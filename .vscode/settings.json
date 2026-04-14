@@ -1,0 +1,11 @@
+{
+  "editor.quickSuggestions": {
+    "comments": "off",
+    "strings": "off",
+    "other": "off"
+  },
+  "editor.inlineSuggest.enabled": false,
+  "[python]": {
+    "editor.defaultFormatterIsMultiRoot": true
+  }
+}
