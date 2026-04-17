@@ -82,6 +82,9 @@ def redrawAll(app):
 def drawStartScreen(app):
     drawLabel("Press 'S' to start the simulator", app.width/2, 50, size = 32, bold = True)
     drawLabel("Press 'P' to open the controller selector", app.width/2, 80, size = 32, bold = True)
+    controllerBoxColor = "white" if app.controllerSelect == None else "lightGreen"
+    drawRect(app.width/2, 130, 400, 40,  fill = controllerBoxColor, border = "Black", align = "center")
+    drawLabel(f"Controller Selected: {app.controllerSelect}", app.width/2, 130, size = 16, bold = True)
     inc = app.width / (len(app.labels) + 1)
     for i in range(len(app.labels)):
         title, attrName, _ = app.labels[i]
@@ -118,6 +121,9 @@ def drawControllerScreen(app):
 
 def drawSim(app):
     drawLabel("Press 'S' to return to the system parameters selector", app.width/2, 50, size = 32, bold = True)
+    drawLabel("Press 'R' to recenter the cart", app.width/2, 80, size = 32, bold = True)
+    if app.controllerSelect != None:
+        drawLabel("Press 'P' to toggle the selected controller", app.width/2, 110, size = 32, bold = True)
     status_box = (20, 20, 220, 50)  # x, y, w, h
     if app.controllerSelect != None:
         bx, by, bw, bh = status_box
@@ -165,6 +171,8 @@ def onKeyPress(app, key):
                 # Reset integral windup and prime error so derivative starts at 0
                 app.PIDTotal = 0
                 app.PIDError = [app.measuredTheta, app.measuredVel]
+        elif key == "r":
+            app.posX = app.width / (2 * PPM)
             
 
 def onKeyHold(app, keys):
@@ -308,6 +316,24 @@ def PID(app):
         swingUp(app)
 
 def swingUp(app):
+    #Find total energy of system and energy error
+    pendulumKineticEnergy = 0.5 * app.pendMass * (app.length * app.thetaDot) ** 2
+    pendulumPotentialEnergy = app.pendMass * app.gravity * app.length * np.cos(app.theta)
+    totalPendulumEnergy = pendulumKineticEnergy + pendulumPotentialEnergy
+
+    desiredPendulumEnergy = app.pendMass * app.gravity * app.length
+    pendulumEnergyError = desiredPendulumEnergy - totalPendulumEnergy
+
+    #Tuning gain
+    k = -3
+    kx = 0.2
+    kxd = 2 * (kx * app.cartMass) ** 0.5 + 0
+
+    forceOnPendulum = k * app.thetaDot * np.cos(app.theta) * pendulumEnergyError - kx * (app.posX - app.width / (2 * PPM)) - kxd * app.xDot
+
+    app.Q = forceOnPendulum
+
+    #Reset integral and derivative terms for PID controller to avoid windup
     app.PIDTotal = 0
     app.PIDError = [app.measuredTheta, app.measuredVel]
 
