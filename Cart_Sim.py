@@ -1,5 +1,6 @@
 from cmu_graphics import *
 import numpy as np
+from scipy.linalg import schur
 import math
 
 PPM = 400 #Pixels Per Meter
@@ -21,6 +22,12 @@ def onAppStart(app):
             "Proportional Term" : {"attr": "ktp", "step": 1},
             "Integral Term"     : {"attr": "kti", "step": 0.01},
             "Derivative Term"   : {"attr": "ktd", "step": 1},
+        },
+        "Linear Quadratic Regulator" : {
+            "Position Term" : {"attr" : "posPunish", "step" : 0.5},
+            "Velocity Term" : {"attr" : "velPunish", "step" : 0.5},
+            "Angle Term" : {"attr" : "thetaPunish", "step" : 1},
+            "Angular Velocity Term": {"attr" : "thetaVelPunish", "step" : 1}
         }
     }
     app.paramSelected = None
@@ -60,10 +67,18 @@ def resetSim(app):
     app.PIDTotal = 0
     app.PIDError = [0, 0]
 
-    #Determines constants for controller
+    #Determines constants for PID controller
     app.ktp = 200
     app. kti = 0.1
     app.ktd = 35
+
+    #Determines constants for LQR and LQG controllers
+    app.posPunish = 10
+    app.velPunish = 2
+    app.thetaPunish = 150
+    app.thetaVelPunish = 30
+    app.controlPunish = 0.01
+    app.firstRun = True
 
     #Create initial accelerations
     verletAccUpdate(app)
@@ -93,7 +108,7 @@ def drawStartScreen(app):
             color = "crimson"
         else:
             color = "lightBlue"
-        drawCircle(xPos, app.posY * PPM, 50, border = "black", fill = color)
+        drawCircle(xPos, app.posY * PPM, 60, border = "black", fill = color)
         drawLabel(f"{title}", xPos, app.posY * PPM - 75, size = 16, bold = True)
         drawLabel(f"{rounded(100 * getattr(app, attrName)) / 100}", xPos, app.posY * PPM, size = 32, bold = True)
 
@@ -101,12 +116,12 @@ def drawControllerScreen(app):
     drawLabel("Press 'S' to start the simulator", app.width/2, 50, size = 32, bold = True)
     drawLabel("Press 'P' to return to the system parameters selector", app.width/2, 80, size = 32, bold = True)
     incX = app.width / (len(app.controllers) + 1)
-    incY = 150
+    incY = 110
     for i, controller in enumerate(list(app.controllers)):
         posX = incX * (i + 1)
         titleColor = "crimson" if controller == app.controllerSelect else "black"
         drawRect(posX - (incX // 2 - 20), 180, incX - 40, 600, fill = "white", border = "black")
-        drawLabel(f"{controller}", posX, 200, size = 32, bold = True, fill = titleColor)
+        drawLabel(f"{controller}", posX, 200, size = 24, bold = True, fill = titleColor)
         for j, paramName in enumerate(list(app.controllers[controller])):
             paramInfo = app.controllers[controller][paramName]
             if j == app.paramSelected and controller == app.controllerSelect:
@@ -114,9 +129,9 @@ def drawControllerScreen(app):
             else:
                 color = "lightBlue"
             posY = 200 + incY * (j + 1)
-            drawCircle(posX, posY, 70, border = "black", fill = color)
-            drawLabel(f"{paramName}", posX, posY - 20, size = 14, bold = True)
-            drawLabel(f"{rounded(100 * getattr(app, paramInfo['attr'])) / 100}", posX, posY + 20, size = 32, bold = True)
+            drawCircle(posX + 70, posY, 50, border = "black", fill = color)
+            drawLabel(f"{paramName}", posX - 70, posY, size = 14, bold = True)
+            drawLabel(f"{rounded(100 * getattr(app, paramInfo['attr'])) / 100}", posX + 70, posY, size = 32, bold = True)
 
 
 def drawSim(app):
@@ -147,6 +162,7 @@ def onKeyPress(app, key):
     if key == "s":
         app.startScreen = not app.startScreen
         resetSim(app)
+        solveForKMatrix(app)
     if app.startScreen:
         if key == "p":
             app.controlsPage = not app.controlsPage
@@ -193,7 +209,7 @@ def onKeyRelease(app, key):
 def onMousePress(app, mouseX, mouseY):
     if app.startScreen and app.controlsPage:
         incX = app.width / (len(app.controllers) + 1)
-        incY = 150
+        incY = 110
         happened = False
         for i, controller in enumerate(list(app.controllers)):
             posX = incX * (i + 1)
@@ -207,7 +223,7 @@ def onMousePress(app, mouseX, mouseY):
                 paramHit = False
                 for j, paramName in enumerate(list(app.controllers[controller])):
                     posY = 200 + incY * (j + 1)
-                    if distance(posX, posY, mouseX, mouseY) <= 70:
+                    if distance(posX + 70, posY, mouseX, mouseY) <= 70:
                         app.paramSelected = j
                         paramHit = True
                         break
@@ -246,8 +262,14 @@ def onStep(app):
     if app.controllerSelect == "Proportional-Integral-Derivative" and app.controllerEnabled == True and not app.startScreen:
         PID(app)
     elif app.controllerSelect == "Linear Quadratic Gaussian" and app.controllerEnabled == True and not app.startScreen:
+        if app.firstRun == True:
+            solveForKMatrix(app)
+            app.firstRun = False
         LQG(app)
     elif app.controllerSelect == "Linear Quadratic Regulator" and app.controllerEnabled == True and not app.startScreen:
+        if app.firstRun == True:
+            solveForKMatrix(app)
+            app.firstRun = False
         LQR(app)
     
 def rescaleTheta(app):
@@ -256,10 +278,6 @@ def rescaleTheta(app):
         app.theta -= 2 * math.pi
 
 def verlet(app):
-    #Using Stormer Verlet integration method because the mechanical energy needs to be preserved
-    Verlet(app)
-
-def Verlet(app):
     #Update positions based on old accels, solve new accels, update velocity
     verletPosUpdate(app)
     verletAccUpdate(app)
@@ -337,6 +355,39 @@ def swingUp(app):
     app.PIDTotal = 0
     app.PIDError = [app.measuredTheta, app.measuredVel]
 
+def solveForKMatrix(app):
+    #Solves Algebraic Riccati Equation to determine the optimal K gain matrix given the constraint function
+
+    #Create system dynamics matricies
+    a = -(app.pendMass * app.gravity / app.cartMass)
+    b = app.gravity * (app.pendMass + app.cartMass) / (app.length * app.cartMass)
+
+    jacobian = np.array([[0, 1, 0, 0],
+                         [0, 0, a, 0],
+                         [0, 0, 0, 1],
+                         [0, 0, b, 0]])
+    
+    controllerCost = np.array([0, app.cartMass ** (-1), 0, -(app.cartMass * app.length) ** (-1)])
+
+    #Create LQR optimization matricies
+    Q = np.diag([app.posPunish, app.velPunish, app.thetaPunish, app.thetaVelPunish])
+    R = app.controlPunish
+
+    #Create hamiltonian matrix to decompose into optimal solutions
+    upperRight = np.outer(controllerCost, controllerCost) / R
+    H = np.block([[jacobian, -1 * upperRight],
+                  [-1 * Q, -1 * jacobian.T]])
+    
+    n = jacobian.shape[0]
+    _, Z, sdim = schur(H, sort="lhp")
+    assert(sdim == n)
+
+    Z11 = Z[:n, :n]
+    Z21 = Z[n:, :n]
+
+    #Compute P matrix and use to solve K
+    P = Z21 @ np.linalg.inv(Z11)
+    app.KMatrix = (1/R) * (controllerCost.T @ P)
 
 def LQG(app):
     angle = kalmanFilter(app.measuredTheta)
@@ -347,8 +398,24 @@ def kalmanFilter(measuredTheta):
     pass
 
 def LQR(app):
-    #Performs Linear Quadratic Regulation control
-    pass
+    #Performs Linear Quadratic Regulation control based on the already discovered K matrix
+    if app.theta >= -0.65 and app.theta <= 0.65:
+        #Defines target values and their errors
+        desiredPos = app.width / (2 * PPM)
+        desiredVel = 0
+        desiredTheta = 0
+        desiredThetaVel = 0
+
+        posError = app.posX - desiredPos
+        velError = app.xDot - desiredVel
+        thetaError = app.theta - desiredTheta
+        thetaVelError = app.thetaDot - desiredThetaVel
+
+        #Creates state vector then solve for control output
+        state = np.array([posError, velError, thetaError, thetaVelError]).T
+        app.Q = -(app.KMatrix @ state)
+    else:
+        swingUp(app)
 
 
 runApp()
