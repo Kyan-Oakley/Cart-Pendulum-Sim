@@ -28,6 +28,12 @@ def onAppStart(app):
             "Velocity Term" : {"attr" : "velPunish", "step" : 0.5},
             "Angle Term" : {"attr" : "thetaPunish", "step" : 1},
             "Angular Velocity Term": {"attr" : "thetaVelPunish", "step" : 1}
+        },
+        "Linear Quadratic Gaussian" : {
+            "Position Term" : {"attr" : "posPunish", "step" : 0.5},
+            "Velocity Term" : {"attr" : "velPunish", "step" : 0.5},
+            "Angle Term" : {"attr" : "thetaPunish", "step" : 1},
+            "Angular Velocity Term": {"attr" : "thetaVelPunish", "step" : 1}
         }
     }
     app.paramSelected = None
@@ -40,11 +46,21 @@ def onAppStart(app):
 
     resetSim(app)
 
+    setGaussianConstants(app)
+
     app.labels = [["Cart Mass (kg)", "cartMass", 1],
                   ["Pendulum Mass (kg)", "pendMass", 1],
                   ["Pendulum Length (m)", "length", 0.1],
                   ["Gravitational Constant (m/s^2)", "gravity", 0.1]]
     app.selectedIndex = None
+
+def setGaussianConstants(app):
+    #Set constants for creating Gaussian Noise
+    app.gaussianMean = 0
+    app.gaussianSTDPos = 0.1
+    app.gaussianSTDVel = 0.1
+    app.gaussianSTDTheta = 0.05
+    app.gaussianSTDThetaVel = 0.05
 
 def resetSim(app):
     #Force on cart initially set to zero
@@ -76,9 +92,12 @@ def resetSim(app):
     app.posPunish = 10
     app.velPunish = 2
     app.thetaPunish = 150
-    app.thetaVelPunish = 30
-    app.controlPunish = 0.01
-    app.firstRun = True
+    app.thetaVelPunish = 40
+    app.controlPunish = 0.1
+
+    #EKF state estimate and covariance
+    app.ekf_state = np.array([app.posX, 0.0, app.theta, 0.0])
+    app.ekf_P = np.eye(4)
 
     #Create initial accelerations
     verletAccUpdate(app)
@@ -159,21 +178,25 @@ def drawSim(app):
 
 ###################################################################UX FUNCTIONS###################################################################
 def onKeyPress(app, key):
+    #Switch between start and sim screens
     if key == "s":
         app.startScreen = not app.startScreen
         resetSim(app)
         solveForKMatrix(app)
     if app.startScreen:
+        #Open the controls selector
         if key == "p":
             app.controlsPage = not app.controlsPage
         elif app.controlsPage:
             if key == "up" or key == "down":
+                #Change the quantity of the selected controller attribute
                 if app.paramSelected is not None and app.controllerSelect is not None:
                     paramName = list(app.controllers[app.controllerSelect])[app.paramSelected]
                     paramInfo = app.controllers[app.controllerSelect][paramName]
                     delta = paramInfo["step"] if key == "up" else -paramInfo["step"]
                     setattr(app, paramInfo["attr"], getattr(app, paramInfo["attr"]) + delta)
         else:
+            #Change the quanitity of the selected physical attribute
             if key == "up" and app.selectedIndex is not None:
                 attrName, step = app.labels[app.selectedIndex][1], app.labels[app.selectedIndex][2]
                 setattr(app, attrName, getattr(app, attrName) + step)
@@ -181,17 +204,21 @@ def onKeyPress(app, key):
                 attrName, step = app.labels[app.selectedIndex][1], app.labels[app.selectedIndex][2]
                 setattr(app, attrName, getattr(app, attrName) - step)
     else:
+        #Toggle the controller when in sim mode
         if (key == "p") and (app.controllerSelect != None):
             app.controllerEnabled = not app.controllerEnabled
             if app.controllerEnabled:
                 # Reset integral windup and prime error so derivative starts at 0
                 app.PIDTotal = 0
                 app.PIDError = [app.measuredTheta, app.measuredVel]
+            else:
+                app.Q = 0
         elif key == "r":
             app.posX = app.width / (2 * PPM)
             
 
 def onKeyHold(app, keys):
+    #Perturb the cart so you can see how it responds
     if not app.startScreen:
         if "right" in keys:
             app.Q = 200
@@ -202,6 +229,7 @@ def onKeyHold(app, keys):
 
     
 def onKeyRelease(app, key):
+    #Allow yourself to not put force on the cart
     if not app.startScreen:
         if key == "right" or key == "left":
             app.Q = 0
@@ -218,6 +246,7 @@ def onMousePress(app, mouseX, mouseY):
             bw = incX - 40
             bh = 600
             if bx <= mouseX <= bx + bw and by <= mouseY <= by + bh:
+                #Selecting controller and the attributes of the controller
                 app.controllerSelect = controller
                 happened = True
                 paramHit = False
@@ -250,27 +279,24 @@ def distance(x0, y0, x1, y1):
     
 ##########################################################INTEGRATOR/CONTROLLER FUNCTIONS#########################################################
 def onStep(app):
-    #Put theta between -pi and pi
-    rescaleTheta(app)
+    if not app.startScreen:
+        #Put theta between -pi and pi
+        rescaleTheta(app)
 
-    #Verlet integration being used because total mechanical integration of the system must be preserved
-    verlet(app)
+        #Verlet integration being used because total mechanical integration of the system must be preserved
+        verlet(app)
 
-    #Start running controller select
-    app.measuredTheta = app.theta
-    app.measuredVel = app.xDot
-    if app.controllerSelect == "Proportional-Integral-Derivative" and app.controllerEnabled == True and not app.startScreen:
-        PID(app)
-    elif app.controllerSelect == "Linear Quadratic Gaussian" and app.controllerEnabled == True and not app.startScreen:
-        if app.firstRun == True:
-            solveForKMatrix(app)
-            app.firstRun = False
-        LQG(app)
-    elif app.controllerSelect == "Linear Quadratic Regulator" and app.controllerEnabled == True and not app.startScreen:
-        if app.firstRun == True:
-            solveForKMatrix(app)
-            app.firstRun = False
-        LQR(app)
+        #Change from integrator parameters to measured parameters by introducing Gaussian noise
+        generateGaussians(app)
+
+        #Start running controller select
+        if app.controllerSelect == "Proportional-Integral-Derivative" and app.controllerEnabled == True and not app.startScreen:
+            PID(app)
+        elif app.controllerSelect == "Linear Quadratic Gaussian" and app.controllerEnabled == True and not app.startScreen:
+            LQG(app)
+        elif app.controllerSelect == "Linear Quadratic Regulator" and app.controllerEnabled == True and not app.startScreen:
+            LQR(app)
+    
     
 def rescaleTheta(app):
     app.theta = (app.theta % (2 * math.pi))
@@ -307,9 +333,22 @@ def verletVelUpdate(app):
     app.xDot += 0.5 * (app.xPrevDubDot + app.xDubDot) * (1 / app.stepspersecond)
     app.thetaDot += 0.5 * (app.thetaPrevDubDot + app.thetaDubDot) * (1 / app.stepspersecond)
 
-def PID(app):
-    #Performs PID (Proportional-Integral-Derivative) control on the angle of the 
+def generateGaussians(app):
+    #Create the Gaussian noise distribution independenlty for each of the measurables
+    noisePos = np.random.normal(app.gaussianMean, app.gaussianSTDPos)
+    noiseVel = np.random.normal(app.gaussianMean, app.gaussianSTDVel)
+    noiseTheta = np.random.normal(app.gaussianMean, app.gaussianSTDTheta)
+    noiseThetaVel = np.random.normal(app.gaussianMean, app.gaussianSTDThetaVel)
 
+    #Add noise to terms
+    app.measuredPos = app.posX + noisePos
+    app.measuredVel = app.xDot + noiseVel
+    app.measuredTheta = app.theta + noiseTheta
+    app.measuredThetaVel = app.thetaDot + noiseThetaVel
+
+
+def PID(app):
+    #Performs PID (Proportional-Integral-Derivative) control on the angle of the
     if app.measuredTheta >= -0.65 and app.measuredTheta < 0.65:
         #Determines constants for controller
         kxp = 6
@@ -333,24 +372,19 @@ def PID(app):
     else:
         swingUp(app)
 
-def swingUp(app):
-    #Find total energy of system and energy error
+def swingUpForce(app):
     pendulumKineticEnergy = 0.5 * app.pendMass * (app.length * app.thetaDot) ** 2
     pendulumPotentialEnergy = app.pendMass * app.gravity * app.length * np.cos(app.theta)
     totalPendulumEnergy = pendulumKineticEnergy + pendulumPotentialEnergy
-
-    desiredPendulumEnergy = app.pendMass * app.gravity * app.length
-    pendulumEnergyError = desiredPendulumEnergy - totalPendulumEnergy
-
-    #Tuning gain
+    pendulumEnergyError = app.pendMass * app.gravity * app.length - totalPendulumEnergy
     k = -3
     kx = 0.2
-    kxd = 2 * (kx * app.cartMass) ** 0.5 + 0
+    kxd = 2 * (kx * app.cartMass) ** 0.5
+    force = k * app.thetaDot * np.cos(app.theta) * pendulumEnergyError - kx * (app.posX - app.width / (2 * PPM)) - kxd * app.xDot
+    return float(np.clip(force, -200, 200))
 
-    forceOnPendulum = k * app.thetaDot * np.cos(app.theta) * pendulumEnergyError - kx * (app.posX - app.width / (2 * PPM)) - kxd * app.xDot
-
-    app.Q = forceOnPendulum
-
+def swingUp(app):
+    app.Q = swingUpForce(app)
     #Reset integral and derivative terms for PID controller to avoid windup
     app.PIDTotal = 0
     app.PIDError = [app.measuredTheta, app.measuredVel]
@@ -390,30 +424,72 @@ def solveForKMatrix(app):
     app.KMatrix = (1/R) * (controllerCost.T @ P)
 
 def LQG(app):
-    angle = kalmanFilter(app.measuredTheta)
+    #Performs Kalman filter then goes right into LQR
+    app.measuredPos, app.measuredVel, app.measuredTheta, app.measuredThetaVel = kalmanFilter(app)
     LQR(app)
 
-def kalmanFilter(measuredTheta):
-    #Filters out error based on system dynamics
-    pass
+#This function was written by AI, but I understand all of it
+def kalmanFilter(app):
+    dt = 1 / app.stepspersecond
+
+    def dynamics(state):
+        x, xdot, theta, thetadot = state
+        M = np.array([[np.cos(theta),              app.length],
+                      [app.cartMass + app.pendMass, app.pendMass * app.length * np.cos(theta)]])
+        rhs = np.array([app.gravity * np.sin(theta),
+                        app.Q + app.pendMass * app.length * thetadot**2 * np.sin(theta)])
+        sol = np.linalg.solve(M, rhs)
+        return np.array([xdot, sol[0], thetadot, sol[1]])
+
+    # --- Predict ---
+    f0 = dynamics(app.ekf_state)
+    x_pred = app.ekf_state + f0 * dt
+
+    # Numerical Jacobian of the discrete transition (F = I + J_continuous * dt)
+    eps = 1e-5
+    J = np.zeros((4, 4))
+    for i in range(4):
+        sp = app.ekf_state.copy()
+        sp[i] += eps
+        J[:, i] = (dynamics(sp) - f0) / eps
+    F = np.eye(4) + J * dt
+
+    Q_noise = np.diag([1e-4, 1e-3, 1e-4, 1e-3])
+    P_pred = F @ app.ekf_P @ F.T + Q_noise
+
+    # --- Update (H = I, so equations simplify) ---
+    R_noise = np.diag([app.gaussianSTDPos**2, app.gaussianSTDVel**2,
+                       app.gaussianSTDTheta**2, app.gaussianSTDThetaVel**2])
+
+    z = np.array([app.measuredPos, app.measuredVel, app.measuredTheta, app.measuredThetaVel])
+    K = P_pred @ np.linalg.inv(P_pred + R_noise)
+
+    app.ekf_state = x_pred + K @ (z - x_pred)
+    app.ekf_P = (np.eye(4) - K) @ P_pred
+
+    return tuple(app.ekf_state)
 
 def LQR(app):
     #Performs Linear Quadratic Regulation control based on the already discovered K matrix
-    if app.theta >= -0.65 and app.theta <= 0.65:
+    if app.measuredTheta >= -0.65 and app.measuredTheta <= 0.65:
         #Defines target values and their errors
         desiredPos = app.width / (2 * PPM)
         desiredVel = 0
         desiredTheta = 0
         desiredThetaVel = 0
 
-        posError = app.posX - desiredPos
-        velError = app.xDot - desiredVel
-        thetaError = app.theta - desiredTheta
-        thetaVelError = app.thetaDot - desiredThetaVel
+        posError = app.measuredPos - desiredPos
+        velError = app.measuredVel - desiredVel
+        thetaError = app.measuredTheta - desiredTheta
+        thetaVelError = app.measuredThetaVel - desiredThetaVel
 
         #Creates state vector then solve for control output
         state = np.array([posError, velError, thetaError, thetaVelError]).T
         app.Q = -(app.KMatrix @ state)
+        if app.Q < -200:
+            app.Q = -200
+        elif app.Q > 200:
+            app.Q = 200
     else:
         swingUp(app)
 
