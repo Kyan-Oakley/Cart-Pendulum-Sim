@@ -27,16 +27,21 @@ def onAppStart(app):
             "Position Term" : {"attr" : "posPunish", "step" : 0.5},
             "Velocity Term" : {"attr" : "velPunish", "step" : 0.5},
             "Angle Term" : {"attr" : "thetaPunish", "step" : 1},
-            "Angular Velocity Term": {"attr" : "thetaVelPunish", "step" : 1}
+            "Angular-Velocity Term": {"attr" : "thetaVelPunish", "step" : 1}
         },
         "Linear Quadratic Gaussian" : {
             "Position Term" : {"attr" : "posPunish", "step" : 0.5},
             "Velocity Term" : {"attr" : "velPunish", "step" : 0.5},
             "Angle Term" : {"attr" : "thetaPunish", "step" : 1},
-            "Angular Velocity Term": {"attr" : "thetaVelPunish", "step" : 1}
+            "Angular-Velocity Term": {"attr" : "thetaVelPunish", "step" : 1}
         }
     }
     app.paramSelected = None
+
+    #Stuff for live toggling
+    app.liveSelectedControllerAttribute = None
+    app.noiseSelected = False
+    app.noiseLevel = 1
 
     #Some constants we will use (and be able to change)
     app.length = 0.5
@@ -44,8 +49,22 @@ def onAppStart(app):
     app.pendMass = 1
     app.gravity = 9.8
 
+    #Determines constants for PID controller
+    app.ktp = 200
+    app. kti = 0.1
+    app.ktd = 35
+
+    #Determines constants for LQR and LQG controllers
+    app.posPunish = 10
+    app.velPunish = 2
+    app.thetaPunish = 150
+    app.thetaVelPunish = 40
+    app.controlPunish = 0.01
+
+    #Sets and resets the conditions of the simulation
     resetSim(app)
 
+    #Sets constants for Gaussian noise
     setGaussianConstants(app)
 
     app.labels = [["Cart Mass (kg)", "cartMass", 1],
@@ -55,12 +74,11 @@ def onAppStart(app):
     app.selectedIndex = None
 
 def setGaussianConstants(app):
-    #Set constants for creating Gaussian Noise
     app.gaussianMean = 0
-    app.gaussianSTDPos = 0.1
-    app.gaussianSTDVel = 0.1
-    app.gaussianSTDTheta = 0.05
-    app.gaussianSTDThetaVel = 0.05
+    app.gaussianSTDPos = 0.05
+    app.gaussianSTDVel = 0.05
+    app.gaussianSTDTheta = 0.025
+    app.gaussianSTDThetaVel = 0.025
 
 def resetSim(app):
     #Force on cart initially set to zero
@@ -74,7 +92,7 @@ def resetSim(app):
     app.xDot = 0
     app.xDubDot = 0
     app.xPrevDubDot = 0
-    app.theta = 0.55
+    app.theta = -3
     app.thetaDot = 0
     app.thetaDubDot = 0
     app.thetaPrevDubDot = 0
@@ -83,34 +101,31 @@ def resetSim(app):
     app.PIDTotal = 0
     app.PIDError = [0, 0]
 
-    #Determines constants for PID controller
-    app.ktp = 200
-    app. kti = 0.1
-    app.ktd = 35
-
-    #Determines constants for LQR and LQG controllers
-    app.posPunish = 10
-    app.velPunish = 2
-    app.thetaPunish = 150
-    app.thetaVelPunish = 40
-    app.controlPunish = 0.1
-
     #EKF state estimate and covariance
     app.ekf_state = np.array([app.posX, 0.0, app.theta, 0.0])
     app.ekf_P = np.eye(4)
 
+    #Reset work done by controller
+    app.workDone = 0
+
     #Create initial accelerations
     verletAccUpdate(app)
+
+    #Resolve for the K matrix
+    solveForKMatrix(app)
 
 #################################################################DRAWING FUNCTIONS#################################################################
 def redrawAll(app):
     if app.startScreen and not app.controlsPage:
+        #Draws the start screen to control the parameters
         drawStartScreen(app)
 
     elif app.startScreen and app.controlsPage:
+        #Draws the controller selection and tuning screen
         drawControllerScreen(app)
 
     else:  
+        #Draws the simulator
         drawSim(app)
 
 def drawStartScreen(app):
@@ -120,6 +135,7 @@ def drawStartScreen(app):
     drawRect(app.width/2, 130, 400, 40,  fill = controllerBoxColor, border = "Black", align = "center")
     drawLabel(f"Controller Selected: {app.controllerSelect}", app.width/2, 130, size = 16, bold = True)
     inc = app.width / (len(app.labels) + 1)
+    #Draws the system parameter buttons
     for i in range(len(app.labels)):
         title, attrName, _ = app.labels[i]
         xPos = inc * (i + 1)
@@ -136,11 +152,13 @@ def drawControllerScreen(app):
     drawLabel("Press 'P' to return to the system parameters selector", app.width/2, 80, size = 32, bold = True)
     incX = app.width / (len(app.controllers) + 1)
     incY = 110
+    #Draws the controller boxes
     for i, controller in enumerate(list(app.controllers)):
         posX = incX * (i + 1)
         titleColor = "crimson" if controller == app.controllerSelect else "black"
         drawRect(posX - (incX // 2 - 20), 180, incX - 40, 600, fill = "white", border = "black")
         drawLabel(f"{controller}", posX, 200, size = 24, bold = True, fill = titleColor)
+        #Draws the controler parameter buttons
         for j, paramName in enumerate(list(app.controllers[controller])):
             paramInfo = app.controllers[controller][paramName]
             if j == app.paramSelected and controller == app.controllerSelect:
@@ -152,23 +170,101 @@ def drawControllerScreen(app):
             drawLabel(f"{paramName}", posX - 70, posY, size = 14, bold = True)
             drawLabel(f"{rounded(100 * getattr(app, paramInfo['attr'])) / 100}", posX + 70, posY, size = 32, bold = True)
 
-
 def drawSim(app):
     drawLabel("Press 'S' to return to the system parameters selector", app.width/2, 50, size = 32, bold = True)
     drawLabel("Press 'R' to recenter the cart", app.width/2, 80, size = 32, bold = True)
+    drawLabel(f"Work done by controller: {int(app.workDone) / 1000} kJ", app.width - 150, 130, size = 20)
     if app.controllerSelect != None:
         drawLabel("Press 'P' to toggle the selected controller", app.width/2, 110, size = 32, bold = True)
-    status_box = (20, 20, 220, 50)  # x, y, w, h
+    #Draws controller status box
+    drawControllerBox(app)
+
+    #Draws controller selector box
+    drawControllerSelectorBox(app)
+
+    #Draws selection menu for controller attributes
+    drawControllerAttributes(app)
+
+    #Draws noise level box
+    drawNoiseBox(app)
+
+    #Draws cart-pendulum system
+    drawCartSys(app)
+
+def drawControllerBox(app):
+    status_box = (20, 20, 300, 50)  # x, y, w, h
     if app.controllerSelect != None:
         bx, by, bw, bh = status_box
         fillColor = "lightGreen" if app.controllerEnabled else "lightCoral"
         drawRect(bx, by, bw, bh, fill = fillColor, border = "black", borderWidth = 2)
         status = "ON" if app.controllerEnabled else "OFF"
-        drawLabel(f"Controller: {status}", bx + bw / 2, by + bh / 2, size = 20, bold = True)
+        drawLabel(f"{app.controllerSelect}: {status}", bx + bw / 2, by + bh / 2, size = 16, bold = True)
+
+def drawControllerSelectorBox(app):
+    startPos = (app.width - 125, 25)
+
+    drawRect(startPos[0], startPos[1], 100, 90, fill = "lightGrey", opacity = 50, border = "black")
+    labels = ["PID", "LQR", "LQG"]
+
+    if app.controllerSelect == "Proportional-Integral-Derivative":
+        selectedIndex = 0
+    elif app.controllerSelect == "Linear Quadratic Regulator":
+        selectedIndex = 1
+    elif app.controllerSelect == "Linear Quadratic Gaussian":
+        selectedIndex = 2
+    else:
+        selectedIndex = None
+
+    inc = 30
+    for i, label in enumerate(labels):
+        if i == selectedIndex:
+            color = "crimson"
+        else:
+            color = "black"
+        posX, posY = app.width - 75, 40 + inc * i
+        drawLabel(f"{label}", posX, posY, size = 20, fill = color)
+
+def drawControllerAttributes(app):
+    if app.controllerSelect != None:
+        inc = 175
+        width = 50 + len(app.controllers[app.controllerSelect]) * inc
+        leftSide = app.width - width
+        drawRect(leftSide, app.height - 200, width, 200, fill = "lightGrey", opacity = 50, border = "black")
+        for i, att in enumerate(list(app.controllers[app.controllerSelect])):
+            posY = app.height - 100
+            posX = leftSide + (107.5 + i * inc)
+            if app.liveSelectedControllerAttribute == i:
+                color = "crimson"
+            else:
+                color = "lightBlue"
+            drawCircle(posX, posY, 75, border = "black", fill = color)
+            first, second = att.split(" ")
+            drawLabel(f"{first}", posX, posY - 30, size = 16)
+            drawLabel(f"{second}", posX, posY - 15, size = 16)
+            val = rounded(100 * getattr(app, app.controllers[app.controllerSelect][att]["attr"])) / 100
+            drawLabel(f"{val}", posX, posY + 20, size = 40, bold = True)
+
+def drawNoiseBox(app):
+    if app.controllerSelect != None:
+        box = (-5, 100, 205, 175)
+        left, top, width, height = box
+        drawRect(left, top, width, height, fill = "lightGray", border = "black")
+        if app.noiseSelected:
+            color = "crimson"
+        else:
+            color = "lightBlue"
+        posX = 100
+        posY = 100 + 175/2
+        drawCircle(posX, posY, 75, fill = color, border = "black")
+        drawLabel("Sensor", posX, posY - 50, size = 20)
+        drawLabel("Noise Level", posX, posY - 30, size = 20)
+        drawLabel(f"{app.noiseLevel}", posX, posY + 15, size = 50)
+
+def drawCartSys(app):
     #Finding endpoint of pendulum
     endpoint = (app.posX + app.length * np.sin(app.theta), app.posY - app.length * np.cos(app.theta))
 
-    #Drawing cart-pendulum system
+    #Drawing
     drawRect(app.posX * PPM - 50, app.posY * PPM - 25, 100, 50)
     drawLine(app.posX * PPM, app.posY * PPM, endpoint[0] * PPM, endpoint[1] * PPM)
     drawCircle(endpoint[0] * PPM, endpoint[1] * PPM, 25)
@@ -182,40 +278,67 @@ def onKeyPress(app, key):
     if key == "s":
         app.startScreen = not app.startScreen
         resetSim(app)
-        solveForKMatrix(app)
     if app.startScreen:
         #Open the controls selector
-        if key == "p":
-            app.controlsPage = not app.controlsPage
-        elif app.controlsPage:
-            if key == "up" or key == "down":
-                #Change the quantity of the selected controller attribute
-                if app.paramSelected is not None and app.controllerSelect is not None:
-                    paramName = list(app.controllers[app.controllerSelect])[app.paramSelected]
-                    paramInfo = app.controllers[app.controllerSelect][paramName]
-                    delta = paramInfo["step"] if key == "up" else -paramInfo["step"]
-                    setattr(app, paramInfo["attr"], getattr(app, paramInfo["attr"]) + delta)
-        else:
-            #Change the quanitity of the selected physical attribute
-            if key == "up" and app.selectedIndex is not None:
-                attrName, step = app.labels[app.selectedIndex][1], app.labels[app.selectedIndex][2]
-                setattr(app, attrName, getattr(app, attrName) + step)
-            elif key == "down" and app.selectedIndex is not None:
-                attrName, step = app.labels[app.selectedIndex][1], app.labels[app.selectedIndex][2]
-                setattr(app, attrName, getattr(app, attrName) - step)
+        startScreenOptions(app, key)
     else:
         #Toggle the controller when in sim mode
-        if (key == "p") and (app.controllerSelect != None):
-            app.controllerEnabled = not app.controllerEnabled
-            if app.controllerEnabled:
-                # Reset integral windup and prime error so derivative starts at 0
-                app.PIDTotal = 0
-                app.PIDError = [app.measuredTheta, app.measuredVel]
-            else:
-                app.Q = 0
-        elif key == "r":
-            app.posX = app.width / (2 * PPM)
-            
+        simScreenOptions(app, key)
+
+def startScreenOptions(app, key):
+    if key == "p":
+        app.controlsPage = not app.controlsPage
+    elif app.controlsPage:
+        if key == "up" or key == "down":
+            #Change the quantity of the selected controller attribute
+            if app.paramSelected is not None and app.controllerSelect is not None:
+                paramName = list(app.controllers[app.controllerSelect])[app.paramSelected]
+                paramInfo = app.controllers[app.controllerSelect][paramName]
+                delta = paramInfo["step"] if key == "up" else -paramInfo["step"]
+                setattr(app, paramInfo["attr"], getattr(app, paramInfo["attr"]) + delta)
+                if getattr(app, paramInfo["attr"]) == 0:
+                    setattr(app, paramInfo["attr"], getattr(app, paramInfo["attr"]) - delta)
+    else:
+        #Change the quanitity of the selected physical attribute
+        if key == "up" and app.selectedIndex is not None:
+            attrName, step = app.labels[app.selectedIndex][1], app.labels[app.selectedIndex][2]
+            setattr(app, attrName, getattr(app, attrName) + step)
+        elif key == "down" and app.selectedIndex is not None:
+            attrName, step = app.labels[app.selectedIndex][1], app.labels[app.selectedIndex][2]
+            setattr(app, attrName, getattr(app, attrName) - step)
+            if almostEqual(getattr(app, attrName), 0):
+                setattr(app, attrName, getattr(app, attrName) + step)
+
+def simScreenOptions(app, key):
+    if (key == "p") and (app.controllerSelect != None):
+        app.controllerEnabled = not app.controllerEnabled
+        if app.controllerEnabled and app.controllerSelect == "Proportional-Integral-Derivative":
+            # Reset integral windup and prime error so derivative starts at 0
+            app.PIDTotal = 0
+            app.PIDError = [app.measuredTheta, app.measuredVel]
+        else:
+            app.Q = 0
+
+    elif key == "r":
+        app.posX = app.width / (2 * PPM)
+
+    #Allow changing the controller attributes
+    elif ((key == "up") or (key == "down")) and app.liveSelectedControllerAttribute != None:
+        paramName = list(app.controllers[app.controllerSelect])[app.liveSelectedControllerAttribute]
+        paramInfo = app.controllers[app.controllerSelect][paramName]
+        delta = paramInfo["step"] if key == "up" else -paramInfo["step"]
+        setattr(app, paramInfo["attr"], getattr(app, paramInfo["attr"]) + delta)
+        if getattr(app, paramInfo["attr"]) == 0:
+            setattr(app, paramInfo["attr"], getattr(app, paramInfo["attr"]) - delta)
+        solveForKMatrix(app)
+
+    #Allow changing the sensor noise
+    elif ((key == "up") or (key == "down")) and app.noiseSelected == True:
+        delta = 1 if key == "up" else -1
+        app.noiseLevel += delta
+        if app.noiseLevel == -1:
+            app.noiseLevel -= delta
+
 
 def onKeyHold(app, keys):
     #Perturb the cart so you can see how it responds
@@ -224,10 +347,7 @@ def onKeyHold(app, keys):
             app.Q = 200
         elif "left" in keys:
             app.Q = -200
-    else:
-        pass
 
-    
 def onKeyRelease(app, key):
     #Allow yourself to not put force on the cart
     if not app.startScreen:
@@ -236,48 +356,106 @@ def onKeyRelease(app, key):
 
 def onMousePress(app, mouseX, mouseY):
     if app.startScreen and app.controlsPage:
-        incX = app.width / (len(app.controllers) + 1)
-        incY = 110
-        happened = False
-        for i, controller in enumerate(list(app.controllers)):
-            posX = incX * (i + 1)
-            bx = posX - (incX // 2 - 20)
-            by = 180
-            bw = incX - 40
-            bh = 600
-            if bx <= mouseX <= bx + bw and by <= mouseY <= by + bh:
-                #Selecting controller and the attributes of the controller
-                app.controllerSelect = controller
-                happened = True
-                paramHit = False
-                for j, paramName in enumerate(list(app.controllers[controller])):
-                    posY = 200 + incY * (j + 1)
-                    if distance(posX + 70, posY, mouseX, mouseY) <= 70:
-                        app.paramSelected = j
-                        paramHit = True
-                        break
-                if not paramHit:
-                    app.paramSelected = None
-                break
-        if not happened:
-            app.paramSelected = None
-            app.controllerSelect = None
+        #Selecting controller
+        selectController(app, mouseX, mouseY)
+
     elif app.startScreen:
-        inc = app.width / (len(app.labels) + 1)
-        happened = False
-        for i in range(len(app.labels)):
-            xPos = inc * (i + 1)
-            if distance(xPos, app.posY * PPM, mouseX, mouseY) <= 100:
-                app.selectedIndex = i
-                happened = True
-        if not happened:
-            app.selectedIndex = None
+        #Select system attribute
+        selectAttribute(app, mouseX, mouseY)
     
+    else:
+        #Live change the controller
+        controlsScreenSelection(app, mouseX, mouseY)
+
+        #Live change controller attributes
+        liveUpdateControllerAttributes(app, mouseX, mouseY)
+
+        #Live change the sensor noise
+        changeSensorNoise(app, mouseX, mouseY)
+
+def selectController(app, mouseX, mouseY):
+    incX = app.width / (len(app.controllers) + 1)
+    incY = 110
+    happened = False
+    for i, controller in enumerate(list(app.controllers)):
+        posX = incX * (i + 1)
+        bx = posX - (incX // 2 - 20)
+        by = 180
+        bw = incX - 40
+        bh = 600
+        if bx <= mouseX <= bx + bw and by <= mouseY <= by + bh:
+            app.controllerSelect = controller
+            happened = True
+            paramHit = False
+            #Selecting attributes of the controller
+            for j, paramName in enumerate(list(app.controllers[controller])):
+                posY = 200 + incY * (j + 1)
+                if distance(posX + 70, posY, mouseX, mouseY) <= 70:
+                    app.paramSelected = j
+                    paramHit = True
+                    break
+            #Clicking empty space detoggles
+            if not paramHit:
+                app.paramSelected = None
+            break
+    #Clicking empty space detoggles
+    if not happened:
+        app.paramSelected = None
+        app.controllerSelect = None
+
+def selectAttribute(app, mouseX, mouseY):
+    inc = app.width / (len(app.labels) + 1)
+    happened = False
+    #Draws attributes
+    for i in range(len(app.labels)):
+        xPos = inc * (i + 1)
+        if distance(xPos, app.posY * PPM, mouseX, mouseY) <= 100:
+            app.selectedIndex = i
+            happened = True
+    if not happened:
+        app.selectedIndex = None
 
 def distance(x0, y0, x1, y1):
     return ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
+
+def controlsScreenSelection(app, mouseX, mouseY):
+    #Function to live toggle the controller type
+    selectNewController(app, mouseX, mouseY)
+
+def selectNewController(app, mouseX, mouseY):
+    box = (app.width - 125, 25, 100, 90)
+    if box[0] <= mouseX <= box[0] + box[2]:
+        if box[1] <= mouseY <= box[1] + box[3] // 3:
+            app.controllerSelect = "Proportional-Integral-Derivative"
+            app.workDone = 0
+        elif box[1] + box[3] // 3 < mouseY <= box[1] + 2 * box[3] // 3:
+            app.controllerSelect = "Linear Quadratic Regulator"
+            app.workDone = 0
+        elif box[1] + 2 * box[3] // 3 < mouseY <= box[1] + box[3]:
+            app.controllerSelect = "Linear Quadratic Gaussian"
+            app.workDone = 0
+
+def liveUpdateControllerAttributes(app, mouseX, mouseY):
+    happened = False
+    inc = 175
+    width = 50 + len(app.controllers[app.controllerSelect]) * inc
+    leftSide = app.width - width
+    for i, att in enumerate(list(app.controllers[app.controllerSelect])):
+        posY = app.height - 100
+        posX = leftSide + (107.5 + i * inc)
+        if distance(posX, posY, mouseX, mouseY) <= 75:
+            app.liveSelectedControllerAttribute = i
+            happened = True
+    if not happened:
+        app.liveSelectedControllerAttribute = None
     
-##########################################################INTEGRATOR/CONTROLLER FUNCTIONS#########################################################
+def changeSensorNoise(app, mouseX, mouseY):
+    if distance(100, 100 + 175/2, mouseX, mouseY) <= 75:
+        app.noiseSelected = True
+    else:
+        app.noiseSelected = False
+
+################################################################INTEGRATOR FUNCTIONS###############################################################
 def onStep(app):
     if not app.startScreen:
         #Put theta between -pi and pi
@@ -296,7 +474,10 @@ def onStep(app):
             LQG(app)
         elif app.controllerSelect == "Linear Quadratic Regulator" and app.controllerEnabled == True and not app.startScreen:
             LQR(app)
-    
+
+        #Update work done for display
+        if app.controllerSelect != None and app.controllerEnabled:
+            app.workDone += abs(app.Q) * abs(app.xDot)
     
 def rescaleTheta(app):
     app.theta = (app.theta % (2 * math.pi))
@@ -333,12 +514,13 @@ def verletVelUpdate(app):
     app.xDot += 0.5 * (app.xPrevDubDot + app.xDubDot) * (1 / app.stepspersecond)
     app.thetaDot += 0.5 * (app.thetaPrevDubDot + app.thetaDubDot) * (1 / app.stepspersecond)
 
+################################################################CONTROLLER FUNCTIONS###############################################################
 def generateGaussians(app):
     #Create the Gaussian noise distribution independenlty for each of the measurables
-    noisePos = np.random.normal(app.gaussianMean, app.gaussianSTDPos)
-    noiseVel = np.random.normal(app.gaussianMean, app.gaussianSTDVel)
-    noiseTheta = np.random.normal(app.gaussianMean, app.gaussianSTDTheta)
-    noiseThetaVel = np.random.normal(app.gaussianMean, app.gaussianSTDThetaVel)
+    noisePos = np.random.normal(app.gaussianMean, app.gaussianSTDPos * app.noiseLevel)
+    noiseVel = np.random.normal(app.gaussianMean, app.gaussianSTDVel * app.noiseLevel)
+    noiseTheta = np.random.normal(app.gaussianMean, app.gaussianSTDTheta * app.noiseLevel)
+    noiseThetaVel = np.random.normal(app.gaussianMean, app.gaussianSTDThetaVel * app.noiseLevel)
 
     #Add noise to terms
     app.measuredPos = app.posX + noisePos
@@ -346,10 +528,14 @@ def generateGaussians(app):
     app.measuredTheta = app.theta + noiseTheta
     app.measuredThetaVel = app.thetaDot + noiseThetaVel
 
-
 def PID(app):
     #Performs PID (Proportional-Integral-Derivative) control on the angle of the
-    if app.measuredTheta >= -0.65 and app.measuredTheta < 0.65:
+    pendulumKineticEnergy = 0.5 * app.pendMass * (app.length * app.measuredThetaVel) ** 2
+    pendulumPotentialEnergy = app.pendMass * app.gravity * app.length * np.cos(app.measuredTheta)
+    totalPendulumEnergy = pendulumKineticEnergy + pendulumPotentialEnergy
+    pendulumEnergyError = app.pendMass * app.gravity * app.length - totalPendulumEnergy
+
+    if app.measuredTheta >= -0.65 and app.measuredTheta < 0.65 and pendulumEnergyError > -3:
         #Determines constants for controller
         kxp = 6
         desiredAngle = 0
@@ -368,26 +554,39 @@ def PID(app):
         #Computes PID
         app.Q = matrix @ state
 
-
     else:
         swingUp(app)
 
 def swingUpForce(app):
-    pendulumKineticEnergy = 0.5 * app.pendMass * (app.length * app.thetaDot) ** 2
-    pendulumPotentialEnergy = app.pendMass * app.gravity * app.length * np.cos(app.theta)
+    pendulumKineticEnergy = 0.5 * app.pendMass * (app.length * app.measuredThetaVel) ** 2
+    pendulumPotentialEnergy = app.pendMass * app.gravity * app.length * np.cos(app.measuredTheta)
     totalPendulumEnergy = pendulumKineticEnergy + pendulumPotentialEnergy
     pendulumEnergyError = app.pendMass * app.gravity * app.length - totalPendulumEnergy
-    k = -3
-    kx = 0.2
-    kxd = 2 * (kx * app.cartMass) ** 0.5
-    force = k * app.thetaDot * np.cos(app.theta) * pendulumEnergyError - kx * (app.posX - app.width / (2 * PPM)) - kxd * app.xDot
-    return float(np.clip(force, -200, 200))
+    k = -60 * app.pendMass/ (((app.pendMass + app.cartMass) ** 0.5) * app.length * app.gravity)
+    kx = 100 / (app.pendMass + app.cartMass)
+    alpha = 0.5
+    kxd = 2 * (kx) ** 0.5
+    force = k * app.measuredThetaVel * np.cos(app.measuredTheta) * pendulumEnergyError - kx * (1 + alpha * pendulumEnergyError) * (app.posX - app.width / (2 * PPM)) - kxd * app.measuredVel
+    if force < -200:
+        force = -200
+    elif force > 200:
+        force = 200
+    return force
 
 def swingUp(app):
     app.Q = swingUpForce(app)
-    #Reset integral and derivative terms for PID controller to avoid windup
-    app.PIDTotal = 0
-    app.PIDError = [app.measuredTheta, app.measuredVel]
+    #Resets integral and derivative terms for PID controller to avoid windup
+    if app.controllerSelect == "Proportional-Integral-Derivative":
+        app.PIDTotal = 0
+        app.PIDError = [app.measuredTheta, app.measuredVel]
+    #Resets Kalman filtering state to avoid windup
+    elif app.controllerSelect == "Linear Quadratic Gaussian":
+        app.ekf_state = np.array([
+        app.measuredPos,
+        app.measuredVel,
+        app.measuredTheta,
+        app.measuredThetaVel
+    ])
 
 def solveForKMatrix(app):
     #Solves Algebraic Riccati Equation to determine the optimal K gain matrix given the constraint function
@@ -425,53 +624,76 @@ def solveForKMatrix(app):
 
 def LQG(app):
     #Performs Kalman filter then goes right into LQR
-    app.measuredPos, app.measuredVel, app.measuredTheta, app.measuredThetaVel = kalmanFilter(app)
+    pendulumKineticEnergy = 0.5 * app.pendMass * (app.length * app.measuredThetaVel) ** 2
+    pendulumPotentialEnergy = app.pendMass * app.gravity * app.length * np.cos(app.measuredTheta)
+    totalPendulumEnergy = pendulumKineticEnergy + pendulumPotentialEnergy
+    pendulumEnergyError = app.pendMass * app.gravity * app.length - totalPendulumEnergy
+
+    if app.measuredTheta >= -0.65 and app.measuredTheta <= 0.65 and pendulumEnergyError > -3:
+        app.measuredPos, app.measuredVel, app.measuredTheta, app.measuredThetaVel = kalmanFilter(app)
     LQR(app)
 
-#This function was written by AI, but I understand all of it
+#This function was written by AI, but I understand the high level principals of what is going on
 def kalmanFilter(app):
     dt = 1 / app.stepspersecond
 
-    def dynamics(state):
-        x, xdot, theta, thetadot = state
-        M = np.array([[np.cos(theta),              app.length],
-                      [app.cartMass + app.pendMass, app.pendMass * app.length * np.cos(theta)]])
-        rhs = np.array([app.gravity * np.sin(theta),
-                        app.Q + app.pendMass * app.length * thetadot**2 * np.sin(theta)])
-        sol = np.linalg.solve(M, rhs)
-        return np.array([xdot, sol[0], thetadot, sol[1]])
-
-    # --- Predict ---
-    f0 = dynamics(app.ekf_state)
+    #Make dynamics based prediction of state
+    f0 = kalmanDynamics(app, app.ekf_state)
     x_pred = app.ekf_state + f0 * dt
 
-    # Numerical Jacobian of the discrete transition (F = I + J_continuous * dt)
+    # Numerical Jacobian of the discrete transition
     eps = 1e-5
     J = np.zeros((4, 4))
     for i in range(4):
         sp = app.ekf_state.copy()
         sp[i] += eps
-        J[:, i] = (dynamics(sp) - f0) / eps
+        J[:, i] = (kalmanDynamics(app, sp) - f0) / eps
     F = np.eye(4) + J * dt
 
+    #Statistics about process noise
     Q_noise = np.diag([1e-4, 1e-3, 1e-4, 1e-3])
-    P_pred = F @ app.ekf_P @ F.T + Q_noise
+    kalmanCovarienceMatrix = F @ app.ekf_P @ F.T + Q_noise  
 
-    # --- Update (H = I, so equations simplify) ---
-    R_noise = np.diag([app.gaussianSTDPos**2, app.gaussianSTDVel**2,
-                       app.gaussianSTDTheta**2, app.gaussianSTDThetaVel**2])
+    #Update trust in sensors as opposed to dynamics model
+    R_noise = np.diag([(app.gaussianSTDPos * app.noiseLevel)**2, (app.gaussianSTDVel * app.noiseLevel)**2,
+                       (app.gaussianSTDTheta * app.noiseLevel)**2, (app.gaussianSTDThetaVel * app.noiseLevel)**2])
 
-    z = np.array([app.measuredPos, app.measuredVel, app.measuredTheta, app.measuredThetaVel])
-    K = P_pred @ np.linalg.inv(P_pred + R_noise)
+    #Finds sensor measurements then computes Kalman gain
+    measurements = np.array([app.measuredPos, app.measuredVel, app.measuredTheta, app.measuredThetaVel])
+    K = kalmanCovarienceMatrix @ np.linalg.inv(kalmanCovarienceMatrix + R_noise)
 
-    app.ekf_state = x_pred + K @ (z - x_pred)
-    app.ekf_P = (np.eye(4) - K) @ P_pred
+    #Makes predictions on most accurate noise-free state is
+    app.ekf_state = x_pred + K @ (measurements - x_pred)
+
+    #Updates future noise estimate
+    app.ekf_P = (np.eye(4) - K) @ kalmanCovarienceMatrix
 
     return tuple(app.ekf_state)
 
+#This function was also written by AI, but I understand it fully
+def kalmanDynamics(app, state):
+    #Numerically solves the linearized system dynamics equations that I derived
+    x, xdot, theta, thetadot = state
+    
+    M = np.array([
+        [app.cartMass + app.pendMass,          app.pendMass * app.length * np.cos(theta)],
+        [app.pendMass * app.length * np.cos(theta), app.pendMass * app.length**2]
+    ])
+    rhs = np.array([
+        app.Q + app.pendMass * app.length * thetadot**2 * np.sin(theta),
+        app.pendMass * app.gravity * app.length * np.sin(theta)
+    ])
+    sol = np.linalg.solve(M, rhs)  # sol = [x'', theta'']
+    return np.array([xdot, sol[0], thetadot, sol[1]])
+
 def LQR(app):
     #Performs Linear Quadratic Regulation control based on the already discovered K matrix
-    if app.measuredTheta >= -0.65 and app.measuredTheta <= 0.65:
+    pendulumKineticEnergy = 0.5 * app.pendMass * (app.length * app.measuredThetaVel) ** 2
+    pendulumPotentialEnergy = app.pendMass * app.gravity * app.length * np.cos(app.measuredTheta)
+    totalPendulumEnergy = pendulumKineticEnergy + pendulumPotentialEnergy
+    pendulumEnergyError = app.pendMass * app.gravity * app.length - totalPendulumEnergy
+
+    if app.measuredTheta >= -0.65 and app.measuredTheta <= 0.65 and pendulumEnergyError > -3:
         #Defines target values and their errors
         desiredPos = app.width / (2 * PPM)
         desiredVel = 0
