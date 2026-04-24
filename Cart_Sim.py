@@ -1,3 +1,14 @@
+''' Feature 1: Attribute selector. Upon the opening page and in the bottom left of the sim, there is the ability to change the parameters of the system by clikc on them and using the arrow keys
+    Feature 2: Controller selector. After pressing "p", you can open the selector for the controllers. By clikcing in the boxes, you select the controllers and by clicking in the circles and pressing the arrows you can change the parameters
+    Feature 3: Sim. I have numerically integrated the equations of motion for this system so that you can see how the system evolves. By pressing the arrow keys you can put force into the cart.
+    Feature 4: Controllers. I added 3 seperate controllers, each with their own pros and cons. These are toggleable by the menu in the top right and enablable by pressing "p".
+    Feature 5: Live selector. I added the ability to change controller parameters live in the same way as the others.
+    Feature 6: Sing up. When the pendulum is spinning too fast or too slow, there is a feature that is able to pump energy in or out of the system.
+    Feature 7: Noise. In the same way that you can chnage all other parameters, you can change the sensor noise that the system is experiencing in the top left corner.
+    Feature 8: Force arrows. I have drawn force arrows on the screen so you can see what controller and perturbed forces the cart is undergoing, and there is the legend on the right to see the exact values.
+    Feature 9: Controller work. In the top right, you can see the ammount of energy the controller has had to expend since you switched to it, allowing you to see how efficient specific controllers are.
+    '''
+
 from cmu_graphics import *
 import numpy as np
 from scipy.linalg import schur
@@ -477,6 +488,8 @@ def selectController(app, mouseX, mouseY):
                 app.paramSelected = None
             break
     #Clicking empty space detoggles
+    if (0 <= mouseX <= 100) and (0 <= mouseY <= 100):
+        happened = True
     if not happened:
         app.paramSelected = None
         app.controllerSelect = None
@@ -551,6 +564,8 @@ def changeSystemParams(app, mouseX, mouseY):
         app.liveSelectedSystemParam = None
 
 ################################################################INTEGRATOR FUNCTIONS###############################################################
+#As a note, for many of these functions, I knew of the concepts beforehand, I used AI to help write the equations in a way that wold be easier to code up, and I used AI slightly for debugging
+#The only errors it caught was that I was using radians instead of degrees and I was missing some negative signs
 def onStep(app):
     if not app.startScreen:
         #Find total force
